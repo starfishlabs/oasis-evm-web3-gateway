@@ -219,19 +219,40 @@ func (api *PublicAPI) ChainId() (*hexutil.Big, error) {
 	return (*hexutil.Big)(big.NewInt(int64(api.chainID))), nil
 }
 
-// GasPrice returns a suggestion for a gas price for legacy transactions.
-func (api *PublicAPI) GasPrice() (*hexutil.Big, error) {
-	logger := api.Logger.With("method", "eth_gasPrice")
-	logger.Debug("request")
+// queryMinGasPrice fetches the runtime minimum gas price map via core.MinGasPrice.
+// Tests may replace this to simulate a successful query or a runtime failure.
+var queryMinGasPrice = func(ctx context.Context, rc client.RuntimeClient) (map[types.Denomination]types.Quantity, error) {
+	return core.NewV1(rc).MinGasPrice(ctx)
+}
 
-	coremod := core.NewV1(api.client)
-	mgp, err := coremod.MinGasPrice(api.ctx)
+// nativeMinGasPrice returns Emerald's native-denomination minimum gas price.
+// eth_gasPrice and eth_maxPriorityFeePerGas both use this helper so they can
+// never report contradictory fees.
+func (api *PublicAPI) nativeMinGasPrice(logger *logging.Logger) (*hexutil.Big, error) {
+	mgp, err := queryMinGasPrice(api.ctx, api.client)
 	if err != nil {
 		logger.Error("core.MinGasPrice failed", "err", err)
 		return nil, ErrInternalError
 	}
 	nativeMGP := mgp[types.NativeDenomination]
 	return (*hexutil.Big)(nativeMGP.ToBigInt()), nil
+}
+
+// GasPrice returns a suggestion for a gas price for legacy transactions.
+func (api *PublicAPI) GasPrice() (*hexutil.Big, error) {
+	logger := api.Logger.With("method", "eth_gasPrice")
+	logger.Debug("request")
+	return api.nativeMinGasPrice(logger)
+}
+
+// MaxPriorityFeePerGas returns a suggestion for a priority fee (EIP-1559 tip).
+// This mirrors the Emerald native-denomination minimum gas price — the same
+// source as eth_gasPrice — until the runtime exposes a distinct priority-fee
+// signal.
+func (api *PublicAPI) MaxPriorityFeePerGas() (*hexutil.Big, error) {
+	logger := api.Logger.With("method", "eth_maxPriorityFeePerGas")
+	logger.Debug("request")
+	return api.nativeMinGasPrice(logger)
 }
 
 // GetBlockTransactionCountByHash returns the number of transactions in the block identified by hash.
