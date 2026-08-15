@@ -20,3 +20,19 @@ oasis-evm-web3-gateway
 # Dependency directories (remove the comment below to include it)
 # vendor/
 .vscode
+
+# Build / package caches
+target/
+node_modules/
+
+# Local environment and pipeline secrets (never commit)
+.gh_token
+.database_url
+.task_id
+.container_name
+.app_name
+.gh_user
+.github_token
+.pipeline-state.json
+.gitkeep
+.progress

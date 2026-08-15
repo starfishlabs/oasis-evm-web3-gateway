@@ -1,0 +1,93 @@
+# Architecture plan: eth_maxPriorityFeePerGas
+
+Product: oasis-evm-web3-gateway (Emerald EVM Web3 JSON-RPC gateway).
+This repo already implements the public `eth` namespace via go-ethereum RPC
+reflection. No new service, namespace, or config flag is required.
+
+## Issues
+
+| # | Title | Depends on |
+|---|-------|------------|
+| 1 | Implement `eth_maxPriorityFeePerGas` | — |
+| 2 | End-to-end check for `eth_maxPriorityFeePerGas` | #1 |
+
+Issue #2 cannot run until #1 is on the public `eth` service.
+
+## Module structure / files
+
+Existing layout (unchanged):
+
+```
+rpc/apis.go              # registers PublicAPI under Namespace "eth", Public: true
+rpc/eth/api.go           # GasPrice + all other eth_* methods
+rpc/eth/api_test.go      # unit tests for the eth API
+rpc/utils/types.go       # RPCTransaction already has GasTipCap (maxPriorityFeePerGas)
+tests/rpc/utils.go       # HTTP Call / CallWithError + localClient(http|ws)
+tests/rpc/rpc_test.go    # e2e tests including TestEth_GasPrice
+tests/rpc/subscribe_test.go  # WebSocket usage via localClient(t, true)
+```
+
+Issue #1 touches:
+
+- `rpc/eth/api.go` — add `MaxPriorityFeePerGas()` next to `GasPrice()`
+- `rpc/eth/api_test.go` — unit tests (success / runtime error / hex encoding)
+
+Issue #2 touches:
+
+- `tests/rpc/` harness (extend `rpc_test.go` or add a sibling test file)
+- reuse `Call` (HTTP) and `localClient(t, true)` / raw WS JSON-RPC (WebSocket)
+
+No new packages, shared types, or registration entries.
+
+## Shared types and fee source
+
+- Return type: `(*hexutil.Big, error)` — same as `GasPrice()`.
+- Encoding: go-ethereum `hexutil.Big` JSON-marshals as a hex quantity (`0x…`).
+- Value source: Emerald native-denomination minimum gas price via
+  `core.NewV1(api.client).MinGasPrice()` → `mgp[types.NativeDenomination]`.
+  This is exactly what `GasPrice()` already uses.
+
+To keep the two methods from ever disagreeing, extract a private helper
+(e.g. `nativeMinGasPrice`) that both `GasPrice` and `MaxPriorityFeePerGas`
+call. The helper logs + returns `ErrInternalError` on query failure so
+neither method can return a zero or fabricated fee.
+
+Until the runtime exposes a distinct EIP-1559 tip signal, the comment on
+`MaxPriorityFeePerGas` must state that it mirrors the minimum gas price.
+
+## Key design decisions
+
+1. **Discovery by convention.** go-ethereum maps `PublicAPI.MaxPriorityFeePerGas`
+   → `eth_maxPriorityFeePerGas`. `rpc.GetRPCAPIs` already registers
+   `eth.NewPublicAPI` as a public `eth` service. Do not add a second API
+   entry, config knob, or method-allowlist change.
+
+2. **Error policy.** Runtime query failure → `ErrInternalError` (standard
+   JSON-RPC error). Never `0x0` / nil-success / guessed default.
+
+3. **Unit tests (#1).** Cover:
+   - success: `MaxPriorityFeePerGas` equals `GasPrice` for the same mock
+     `MinGasPrice` response;
+   - runtime-failure: both methods (or the shared helper) return
+     `ErrInternalError`;
+   - hex-quantity encoding: JSON marshal of the result is a `0x`-prefixed
+     quantity (use `hexutil.Big`).
+   Inject a fake `client.RuntimeClient` (or a narrow query hook) so tests
+   do not need a live Oasis node.
+
+4. **E2E tests (#2).** Against the existing `tests/rpc` spin-up:
+   - HTTP: `Call(t, "eth_maxPriorityFeePerGas", []interface{}{})` — result
+     unmarshals to `hexutil.Big` / well-formed `0x…` quantity;
+   - WebSocket: same method, identical numeric value as HTTP;
+   - implicit discoverability: a successful public-namespace call without
+     extra gateway config is the proof. No `rpc_modules` change required.
+
+5. **EIP-1559 completeness is out of scope.** Do not implement
+   `eth_feeHistory` or change tx construction. `RPCTransaction.GasTipCap`
+   already serializes `maxPriorityFeePerGas` on typed txs.
+
+## Implementation order
+
+1. Shared helper + `MaxPriorityFeePerGas` + unit tests (`rpc/eth`).
+2. HTTP + WebSocket e2e assertions in `tests/rpc`, reusing the existing
+   `Setup`/`Shutdown` harness.
